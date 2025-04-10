@@ -1,180 +1,191 @@
 <?php
-// 设置响应头为ICO图标格式
-header('Content-Type: image/x-icon');
+// 设置错误报告
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 
-// 定义默认图标的SHA1哈希值
-define('DEFAULT_ICON_SHA1', '086b07df148df70aac37ead9868b2df44ab91576');
-// 定义缓存过期时间为30天（秒数）
-define('CACHE_EXPIRE_SECONDS', 30 * 24 * 60 * 60);
-// 定义缓存目录路径
-define('CACHE_DIR', __DIR__ . '/cache/');
-// 定义默认图标文件路径
+// 定义常量
+define('CACHE_DIR', __DIR__ . '/cache');
 define('DEFAULT_ICON', __DIR__ . '/default.ico');
+define('CACHE_EXPIRE', 30 * 24 * 60 * 60); // 30天
+define('YANDEX_DEFAULT_SHA1', '086b07df148df70aac37ead9868b2df44ab91576');
+define('SPLITBEE_DEFAULT_SHA1', '2d7c9b60d1e2b4f4726141de2e4ab738110b9287');
 
-// 检查并创建缓存目录（如果不存在）
-if (!is_dir(CACHE_DIR) && !mkdir(CACHE_DIR, 0755, true) && !is_dir(CACHE_DIR)) {
-    header('HTTP/1.1 500 Internal Server Error');
-    exit('Failed to create cache directory');
+// 创建cache目录
+if (!file_exists(CACHE_DIR)) {
+    mkdir(CACHE_DIR, 0755, true);
 }
 
-// 处理无参数直接访问的情况
-if (basename($_SERVER['SCRIPT_NAME']) === 'get.php' && empty(trim($_GET['url'] ?? ''))) {
-    serveDefaultIcon();
+// 获取URL参数
+$url = isset($_GET['url']) ? trim($_GET['url']) : '';
+if (empty($url)) {
+    header('HTTP/1.1 400 Bad Request');
+    die('Missing url parameter');
+}
+
+// 格式化域名
+$domain = formatDomain($url);
+$cacheFile = CACHE_DIR . '/' . md5($domain) . '.ico';
+
+// 检查缓存是否存在且未过期
+if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < CACHE_EXPIRE) {
+    serveIcon($cacheFile);
     exit;
 }
 
-try {
-    // 获取并规范化URL参数中的域名
-    $domain = normalizeDomain($_GET['url'] ?? '');
+// 尝试从Yandex获取favicon
+$iconData = tryYandex($domain);
+if ($iconData === null) {
+    // 尝试从Splitbee获取favicon
+    $iconData = trySplitbee($domain);
+}
+
+if ($iconData === null) {
+    // 如果都失败，使用默认图标
+    if (file_exists(DEFAULT_ICON)) {
+        // 创建软链接
+        if (!file_exists($cacheFile)) {
+            symlink(DEFAULT_ICON, $cacheFile);
+        }
+        serveIcon(DEFAULT_ICON);
+    } else {
+        header('HTTP/1.1 404 Not Found');
+        die('Favicon not found and no default icon available');
+    }
+} else {
+    // 保存到缓存
+    file_put_contents($cacheFile, $iconData);
+    serveIcon($cacheFile);
+}
+
+/**
+ * 格式化域名
+ */
+function formatDomain($url) {
+    // 移除协议和路径
+    $domain = preg_replace('~^(https?://)?(www\.)?~i', '', $url);
     
-    // 如果域名为空则返回默认图标
-    if (empty($domain)) {
-        serveDefaultIcon();
+    // 移除路径和查询参数
+    $domain = explode('/', $domain)[0];
+    $domain = explode('?', $domain)[0];
+    $domain = explode('#', $domain)[0];
+    
+    return strtolower($domain);
+}
+
+/**
+ * 尝试从Yandex获取favicon
+ */
+function tryYandex($domain) {
+    $url = "https://favicon.yandex.net/favicon/v2/{$domain}?size=32";
+    $iconData = downloadIcon($url);
+    
+    if ($iconData === null) {
+        return null;
+    }
+    
+    $sha1 = sha1($iconData);
+    if ($sha1 !== YANDEX_DEFAULT_SHA1) {
+        return $iconData;
+    }
+    
+    // 尝试加上www前缀
+    $wwwDomain = 'www.' . $domain;
+    $url = "https://favicon.yandex.net/favicon/v2/{$wwwDomain}?size=32";
+    $wwwIconData = downloadIcon($url);
+    
+    if ($wwwIconData === null) {
+        return $iconData;
+    }
+    
+    $wwwSha1 = sha1($wwwIconData);
+    if ($wwwSha1 !== YANDEX_DEFAULT_SHA1) {
+        return $wwwIconData;
+    }
+    
+    return null;
+}
+
+/**
+ * 尝试从Splitbee获取favicon
+ */
+function trySplitbee($domain) {
+    $url = "https://favicon.splitbee.io/?url={$domain}";
+    $iconData = downloadIcon($url);
+    
+    if ($iconData === null) {
+        return null;
+    }
+    
+    $sha1 = sha1($iconData);
+    if ($sha1 !== SPLITBEE_DEFAULT_SHA1) {
+        return $iconData;
+    }
+    
+    // 尝试加上www前缀
+    $wwwDomain = 'www.' . $domain;
+    $url = "https://favicon.splitbee.io/?url={$wwwDomain}";
+    $wwwIconData = downloadIcon($url);
+    
+    if ($wwwIconData === null) {
+        return $iconData;
+    }
+    
+    $wwwSha1 = sha1($wwwIconData);
+    if ($wwwSha1 !== SPLITBEE_DEFAULT_SHA1) {
+        return $wwwIconData;
+    }
+    
+    return null;
+}
+
+/**
+ * 下载图标
+ */
+function downloadIcon($url) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    
+    $data = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode !== 200 || empty($data)) {
+        return null;
+    }
+    
+    return $data;
+}
+
+/**
+ * 输出图标
+ */
+function serveIcon($file) {
+    $mime = 'image/x-icon';
+    $lastModified = filemtime($file);
+    $etag = md5_file($file);
+    
+    header('Content-Type: ' . $mime);
+    header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $lastModified) . ' GMT');
+    header('ETag: "' . $etag . '"');
+    
+    // 检查客户端缓存
+    if (isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && 
+        strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $lastModified) {
+        header('HTTP/1.1 304 Not Modified');
         exit;
     }
     
-    // 生成基于域名MD5的缓存文件名
-    $cacheFile = CACHE_DIR . md5($domain) . '.ico';
-    
-    // 检查缓存文件是否存在
-    if (file_exists($cacheFile)) {
-        // 如果是软链接则返回默认图标
-        if (is_link($cacheFile)) {
-            serveDefaultIcon();
-            exit;
-        }
-        
-        // 如果缓存未过期则直接输出缓存文件
-        if (isCacheValid($cacheFile)) {
-            readfile($cacheFile);
-            exit;
-        }
-        
-        // 删除过期的缓存文件
-        unlink($cacheFile);
+    if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && 
+        trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag) {
+        header('HTTP/1.1 304 Not Modified');
+        exit;
     }
     
-    // 尝试获取带www回退的favicon数据
-    $faviconData = fetchFaviconWithFallback($domain);
-    
-    // 处理获取到的favicon数据
-    processFaviconResult($faviconData, $cacheFile);
-
-} catch (Exception $e) {
-    // 记录错误日志并返回默认图标
-    error_log('Favicon Error: ' . $e->getMessage());
-    serveDefaultIcon();
+    readfile($file);
 }
-
-/**
- * 规范化域名处理函数
- * @param string $domain 原始域名
- * @return string 处理后的规范化域名
- */
-function normalizeDomain($domain) {
-    // 移除http://和https://协议头
-    $domain = str_replace(['http://', 'https://'], '', $domain);
-    // 移除www.前缀（不区分大小写）
-    $domain = preg_replace('/^www\./i', '', $domain);
-    // 返回小写并去除两端空格的域名
-    return strtolower(trim($domain));
-}
-
-/**
- * 检查缓存是否有效
- * @param string $cacheFile 缓存文件路径
- * @return bool 是否有效
- */
-function isCacheValid($cacheFile) {
-    return (time() - filemtime($cacheFile)) < CACHE_EXPIRE_SECONDS;
-}
-
-/**
- * 输出默认图标
- */
-function serveDefaultIcon() {
-    // 检查默认图标文件是否存在
-    if (file_exists(DEFAULT_ICON)) {
-        readfile(DEFAULT_ICON);
-    } else {
-        // 不存在则返回404状态码
-        header('HTTP/1.1 404 Not Found');
-    }
-}
-
-/**
- * 获取带www回退的favicon数据
- * @param string $domain 域名
- * @return mixed 获取到的favicon数据
- */
-function fetchFaviconWithFallback($domain) {
-    // 首先尝试获取无www的favicon
-    $faviconData = getFavicon($domain);
-    
-    // 如果获取到的是默认图标，则尝试带www的版本
-    if ($faviconData && sha1($faviconData) === DEFAULT_ICON_SHA1) {
-        $wwwData = getFavicon('www.' . $domain);
-        return $wwwData ?: $faviconData;
-    }
-    
-    return $faviconData;
-}
-
-/**
- * 处理获取到的favicon结果
- * @param mixed $faviconData favicon数据
- * @param string $cacheFile 缓存文件路径
- */
-function processFaviconResult($faviconData, $cacheFile) {
-    // 如果没有获取到数据则返回默认图标
-    if (!$faviconData) {
-        serveDefaultIcon();
-        return;
-    }
-    
-    // 检查是否为默认图标
-    if (sha1($faviconData) === DEFAULT_ICON_SHA1) {
-        // 创建指向默认图标的软链接
-        if (file_exists(DEFAULT_ICON)) {
-            @unlink($cacheFile);
-            symlink(DEFAULT_ICON, $cacheFile);
-        }
-        serveDefaultIcon();
-        return;
-    }
-    
-    // 保存新获取的favicon到缓存文件并输出
-    file_put_contents($cacheFile, $faviconData);
-    echo $faviconData;
-}
-
-/**
- * 从Yandex获取favicon
- * @param string $domain 域名
- * @return mixed 获取到的favicon数据
- */
-function getFavicon($domain) {
-    // 使用静态变量保持CURL句柄
-    static $ch = null;
-    
-    // 初始化CURL句柄
-    if ($ch === null) {
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_TIMEOUT => 5,
-            CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 Favicon Fetcher',
-        ]);
-    }
-    
-    // 设置Yandex favicon API URL
-    curl_setopt($ch, CURLOPT_URL, 'https://favicon.yandex.net/favicon/v2/' . urlencode($domain) . '?size=32');
-    // 执行请求获取数据
-    $data = curl_exec($ch);
-    
-    // 返回成功获取的数据或false
-    return (curl_getinfo($ch, CURLINFO_HTTP_CODE) === 200 && !empty($data)) ? $data : false;
-}
+?>
