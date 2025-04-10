@@ -1,5 +1,5 @@
 # GetFavicon
-php GetFavicon throw https://favicon.yandex.net/favicon/v2/
+php GetFavicon throw https://favicon.yandex.net/favicon/v2/ and https://favicon.splitbee.io/?url=
 
 
 
